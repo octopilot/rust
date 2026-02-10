@@ -15,7 +15,21 @@ fi
 
 WORKSPACE_DIR="${BP_RUST_WORKSPACE_DIR:-.}"
 MANIFEST_PATH="${BUILD_DIR}/${WORKSPACE_DIR}/Cargo.toml"
-TARGET="${BP_RUST_TARGET:-x86_64-unknown-linux-gnu}"
+
+# Host-aware target: when BP_RUST_TARGET is unset, use native container arch so we don't
+# cross-compile (e.g. avoid x86_64 on aarch64 which causes "cc: error: unrecognized option '-m64'").
+if [[ -n "${BP_RUST_TARGET:-}" ]]; then
+  TARGET="${BP_RUST_TARGET}"
+else
+  arch=$(uname -m 2>/dev/null || echo unknown)
+  case "${arch}" in
+    x86_64|amd64) TARGET="x86_64-unknown-linux-gnu" ;;
+    aarch64|arm64) TARGET="aarch64-unknown-linux-gnu" ;;
+    armv7l|armv6l) TARGET="armv7-unknown-linux-gnueabihf" ;;
+    *) TARGET="x86_64-unknown-linux-gnu" ;;  # fallback for unknown
+  esac
+fi
+
 PACKAGE="${BP_RUST_PACKAGE:-}"
 BINARY_NAME="${BP_RUST_BINARY_NAME:-}"
 
