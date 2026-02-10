@@ -1,11 +1,17 @@
 #!/bin/bash
 # Build Rust app: install Rust if needed, cargo build --release, copy binary to output.
-set -ex
+set -e
 
-BUILD_DIR="${CNB_BUILD_DIR:?}"
-LAYERS_DIR="${CNB_LAYERS_DIR:?}"
-OUTPUT_DIR="${CNB_OUTPUT_DIR:?}"
+# Lifecycle sets these; use standard build container paths when unset (e.g. some platforms).
+BUILD_DIR="${CNB_BUILD_DIR:-/workspace}"
+LAYERS_DIR="${CNB_LAYERS_DIR:-/layers}"
+OUTPUT_DIR="${CNB_OUTPUT_DIR:-/workspace}"
 PLAN_PATH="${CNB_PLAN_PATH:-/dev/null}"
+
+if [[ ! -d "${BUILD_DIR}" ]]; then
+  echo "CNB_BUILD_DIR (${BUILD_DIR}) is not a directory" >&2
+  exit 1
+fi
 
 WORKSPACE_DIR="${BP_RUST_WORKSPACE_DIR:-.}"
 MANIFEST_PATH="${BUILD_DIR}/${WORKSPACE_DIR}/Cargo.toml"
