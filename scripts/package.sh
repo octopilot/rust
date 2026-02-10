@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -euox pipefail
 
 ROOT_DIR="$(cd "$(dirname "${0}")/.." && pwd)"
 BIN_DIR="${ROOT_DIR}/.bin"

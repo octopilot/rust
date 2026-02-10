@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build Rust app: install Rust if needed, cargo build --release, copy binary to output.
-set -e
+set -ex
 
 BUILD_DIR="${CNB_BUILD_DIR:?}"
 LAYERS_DIR="${CNB_LAYERS_DIR:?}"

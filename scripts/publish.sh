@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -eu
+set -eux
 set -o pipefail
 
 readonly ROOT_DIR="$(cd "$(dirname "${0}")/.." && pwd)"
