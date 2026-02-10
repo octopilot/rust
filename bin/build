@@ -1,0 +1,97 @@
+#!/bin/bash
+# Build Rust app: install Rust if needed, cargo build --release, copy binary to output.
+set -e
+
+BUILD_DIR="${CNB_BUILD_DIR:?}"
+LAYERS_DIR="${CNB_LAYERS_DIR:?}"
+OUTPUT_DIR="${CNB_OUTPUT_DIR:?}"
+PLAN_PATH="${CNB_PLAN_PATH:-/dev/null}"
+
+WORKSPACE_DIR="${BP_RUST_WORKSPACE_DIR:-.}"
+MANIFEST_PATH="${BUILD_DIR}/${WORKSPACE_DIR}/Cargo.toml"
+TARGET="${BP_RUST_TARGET:-x86_64-unknown-linux-gnu}"
+PACKAGE="${BP_RUST_PACKAGE:-}"
+BINARY_NAME="${BP_RUST_BINARY_NAME:-}"
+
+RUST_LAYER="${LAYERS_DIR}/rust"
+RUSTUP_HOME="${RUST_LAYER}/rustup"
+CARGO_HOME="${RUST_LAYER}/cargo"
+export RUSTUP_HOME CARGO_HOME
+export PATH="${CARGO_HOME}/bin:${PATH}"
+
+# Install Rust into layer (reused on cache)
+if [[ ! -x "${CARGO_HOME}/bin/cargo" ]]; then
+  echo "Installing Rust..."
+  mkdir -p "${RUST_LAYER}"
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --no-modify-path
+  rustup target add "${TARGET}" 2>/dev/null || true
+fi
+
+# Build args: release, optional target, optional -p
+EXTRA_ARGS=("--release" "--manifest-path" "${MANIFEST_PATH}")
+if [[ -n "$TARGET" ]]; then
+  EXTRA_ARGS+=(--target "$TARGET")
+fi
+if [[ -n "$PACKAGE" ]]; then
+  EXTRA_ARGS+=(-p "$PACKAGE")
+fi
+# armv7: jemalloc not supported; disable default features for that target
+if [[ "$TARGET" == "armv7-unknown-linux-musleabihf" ]]; then
+  EXTRA_ARGS+=(--no-default-features)
+fi
+
+# Build from app root so relative paths in Cargo.toml resolve
+cd "${BUILD_DIR}"
+cargo build "${EXTRA_ARGS[@]}"
+
+# Workspace root is the directory containing the manifest; target is under it
+MANIFEST_DIR="$(dirname "${MANIFEST_PATH}")"
+TARGET_DIR="${MANIFEST_DIR}/target"
+RELEASE_DIR="${TARGET_DIR}/${TARGET}/release"
+if [[ ! -d "${RELEASE_DIR}" ]]; then
+  RELEASE_DIR="${TARGET_DIR}/release"
+fi
+
+# Choose which binary to copy
+if [[ -n "$BINARY_NAME" ]]; then
+  BINARY="${RELEASE_DIR}/${BINARY_NAME}"
+  if [[ ! -f "$BINARY" ]]; then
+    echo "Binary not found: $BINARY" >&2
+    exit 1
+  fi
+elif [[ -n "$PACKAGE" ]]; then
+  BINARY="${RELEASE_DIR}/${PACKAGE}"
+  if [[ ! -f "$BINARY" ]]; then
+    # Package might have different bin name (e.g. [[bin]] in Cargo.toml)
+    BINARY=$(find "${RELEASE_DIR}" -maxdepth 1 -type f -executable -name "${PACKAGE}*" 2>/dev/null | head -1)
+    if [[ -z "$BINARY" ]]; then
+      BINARY=$(find "${RELEASE_DIR}" -maxdepth 1 -type f -executable ! -name "*.so" ! -name "*.rlib" 2>/dev/null | head -1)
+    fi
+  fi
+  if [[ -z "$BINARY" || ! -f "$BINARY" ]]; then
+    echo "No binary found for package ${PACKAGE} in ${RELEASE_DIR}" >&2
+    exit 1
+  fi
+else
+  # Single binary or first in workspace
+  BINARY=$(find "${RELEASE_DIR}" -maxdepth 1 -type f -executable ! -name "*.so" ! -name "*.rlib" 2>/dev/null | head -1)
+  if [[ -z "$BINARY" ]]; then
+    echo "No binary found in ${RELEASE_DIR}" >&2
+    exit 1
+  fi
+fi
+
+# Copy to output (launch layer)
+mkdir -p "${OUTPUT_DIR}/bin"
+cp "$BINARY" "${OUTPUT_DIR}/bin/web"
+chmod +x "${OUTPUT_DIR}/bin/web"
+
+# Default process type (in a layer so lifecycle merges it)
+mkdir -p "${LAYERS_DIR}/launch"
+cat >> "${LAYERS_DIR}/launch/launch.toml" << LAUNCH
+[[processes]]
+type = "web"
+command = "bin/web"
+LAUNCH
+
+echo "Rust build complete: $(basename "$BINARY") -> bin/web"

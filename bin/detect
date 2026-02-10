@@ -1,0 +1,10 @@
+#!/bin/bash
+# Detect Rust app: Cargo.toml in build dir or in BP_RUST_WORKSPACE_DIR.
+set -e
+BUILD_DIR="${CNB_BUILD_DIR:-.}"
+WORKSPACE_DIR="${BP_RUST_WORKSPACE_DIR:-.}"
+MANIFEST="${BUILD_DIR}/${WORKSPACE_DIR}/Cargo.toml"
+if [[ -f "$MANIFEST" ]]; then
+  exit 0
+fi
+exit 100

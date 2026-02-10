@@ -1,0 +1,27 @@
+api = "0.7"
+
+[buildpack]
+  description = "Build Rust applications (single crate, workspace, or one package in a workspace)"
+  homepage = "https://github.com/octopilot/buildpacks"
+  id = "octopilot/rust"
+  name = "Octopilot Rust Buildpack"
+  version = "0.0.1"
+  keywords = ["rust", "cargo", "workspace", "microservices"]
+
+  [[buildpack.licenses]]
+    type = "Apache-2.0"
+    uri = "https://github.com/octopilot/buildpacks/blob/main/rust/LICENSE"
+
+[metadata]
+  include-files = ["buildpack.toml", "bin/detect", "bin/build"]
+
+[[stacks]]
+  id = "*"
+
+[[targets]]
+  os = "linux"
+  arch = "amd64"
+
+[[targets]]
+  os = "linux"
+  arch = "arm64"
