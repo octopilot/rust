@@ -181,23 +181,6 @@ ${default_line}
 LAUNCH
 done
 
-# Copy public/ for Dioxus fullstack (backend looks for it next to binary or in workspace)
-APP_ROOT="${BUILD_DIR}/${WORKSPACE_DIR}"
-if [[ -d "${APP_ROOT}/public" ]]; then
-  # Dioxus server looks for public relative to binary (bin/public) or workspace root
-  mkdir -p "${OUTPUT_DIR}/bin"
-  CANON_APP=$(cd "${APP_ROOT}" 2>/dev/null && pwd -P)
-  CANON_OUT=$(cd "${OUTPUT_DIR}" 2>/dev/null && pwd -P)
-  if [[ "${CANON_APP}" != "${CANON_OUT}" ]]; then
-    cp -r "${APP_ROOT}/public" "${OUTPUT_DIR}/"
-  fi
-  # Ensure bin/public exists (Dioxus looks next to executable)
-  if [[ ! -d "${OUTPUT_DIR}/bin/public" ]]; then
-    cp -r "${APP_ROOT}/public" "${OUTPUT_DIR}/bin/"
-  fi
-  echo "Copied public/ for Dioxus"
-fi
-
 # Write manifest for per-package image tooling (one binary per line)
 for b in "${BINARIES[@]}"; do basename "$b"; done > "${OUTPUT_DIR}/.rust-binaries" 2>/dev/null || true
 
