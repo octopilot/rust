@@ -12,6 +12,27 @@ Cloud Native Buildpack for Rust: builds a **single crate**, a **workspace** (all
 - Runs `cargo build` in **release** or **debug** mode (see `BP_RUST_BUILD_PROFILE`), with optional target and package selection.
 - Copies the resulting binary to `bin/<name>` (name from Cargo: package name or `[[bin]]` name, hyphens → underscores) and sets the default `web` process.
 
+**Asset copy (public/, config/, etc.)**: The buildpack does *not* copy assets. Use `project.toml` with an [inline buildpack](https://buildpacks.io/docs/for-app-developers/how-to/build-inputs/use-inline-buildpacks) to copy `public/`, `config/`, or other app-specific paths after the Rust build. Example:
+
+```toml
+[[io.buildpacks.group]]
+id = "octopilot/rust"
+version = "0.1.3"
+
+[[io.buildpacks.group]]
+id = "myapp/copy-assets"
+[io.buildpacks.group.script]
+api = "0.10"
+inline = """
+set -e
+OUT="${CNB_OUTPUT_DIR:-/workspace}"
+APP="${CNB_BUILD_DIR:-/workspace}"
+[ -d "$APP/public" ] && cp -r "$APP/public" "$OUT/" || true
+"""
+```
+
+This keeps the buildpack focused and lets apps define their layout explicitly.
+
 ## Optional environment variables
 
 Set at build time (e.g. `pack build --env BP_RUST_PACKAGE=myapp_service_impl` or `pack build --env BP_RUST_BUILD_PROFILE=debug`):

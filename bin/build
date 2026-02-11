@@ -185,10 +185,11 @@ done
 for b in "${BINARIES[@]}"; do basename "$b"; done > "${OUTPUT_DIR}/.rust-binaries" 2>/dev/null || true
 
 # Remove target/ and .cargo/ from workspace so they are not exported (saves ~1.5GB)
+# Use || true so cleanup failure (e.g. immutable files, mounts) does not fail the build
 for dir in "${TARGET_DIR}" "${BUILD_DIR}/target" "${MANIFEST_DIR}/target" "${BUILD_DIR}/.cargo" "${MANIFEST_DIR}/.cargo"; do
   if [[ -d "${dir}" ]]; then
-    rm -rf "${dir}"
-    echo "Removed $(basename "${dir}")/ from output"
+    rm -rf "${dir}" 2>/dev/null || true
+    [[ ! -d "${dir}" ]] && echo "Removed $(basename "${dir}")/ from output"
   fi
 done
 
