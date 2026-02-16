@@ -17,7 +17,7 @@ Cloud Native Buildpack for Rust: builds a **single crate**, a **workspace** (all
 ```toml
 [[io.buildpacks.group]]
 id = "octopilot/rust"
-version = "0.1.3"
+version = "0.1.5"
 
 [[io.buildpacks.group]]
 id = "myapp/copy-assets"
