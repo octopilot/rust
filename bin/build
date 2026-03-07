@@ -153,6 +153,10 @@ fi
 # Copy all binaries to output and build launch.toml (at root of buildpack layers dir)
 mkdir -p "${OUTPUT_DIR}/bin"
 
+# #region agent log (debug: verify launch.toml path and content for default process)
+echo "[rust buildpack] LAYERS_DIR=${LAYERS_DIR} OUTPUT_DIR=${OUTPUT_DIR}" >&2
+# #endregion
+
 first=true
 for BINARY in "${BINARIES[@]}"; do
   [[ -z "$BINARY" || ! -f "$BINARY" ]] && continue
@@ -180,6 +184,10 @@ command = ["bin/${BIN_NAME}"]
 ${default_line}
 LAUNCH
 done
+
+# #region agent log (debug: verify launch.toml content)
+[[ -f "${LAYERS_DIR}/launch.toml" ]] && echo "[rust buildpack] launch.toml content:" >&2 && cat "${LAYERS_DIR}/launch.toml" >&2
+# #endregion
 
 # Write manifest for per-package image tooling (one binary per line)
 for b in "${BINARIES[@]}"; do basename "$b"; done > "${OUTPUT_DIR}/.rust-binaries" 2>/dev/null || true
