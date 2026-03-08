@@ -1,7 +1,7 @@
 # Trigger release: bump version in buildpack.toml, tag, push, and create GitHub release.
 # Same pattern as octopilot-pipeline-tools (uses reusable workflow + bump-version with buildpack mode).
 # Requires secrets.REPO_PAT (org-level PAT with contents:write) so the push triggers CI (push-buildpackage).
-# When this repo is the octopilot monorepo, file is buildpacks/rust/buildpack.toml; for a standalone rust repo use buildpack.toml.
+# file: monorepo uses buildpacks/rust/buildpack.toml; bump-version action falls back to buildpack.toml when that path is missing (standalone repo).
 name: Trigger Release
 
 on:
