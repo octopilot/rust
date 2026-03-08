@@ -29,6 +29,20 @@ function util::tools::path::export() {
   fi
 }
 
+# Retry curl up to 3 times on 5xx or connection errors (transient GitHub/CDN failures)
+function util::tools::curl_with_retry() {
+  local max_attempts=3 attempt=1 code=0
+  while [[ ${attempt} -le ${max_attempts} ]]; do
+    if curl "$@"; then
+      return 0
+    fi
+    code=$?
+    [[ ${attempt} -lt ${max_attempts} ]] && sleep $((attempt * 5))
+    attempt=$((attempt + 1))
+  done
+  return ${code}
+}
+
 function util::tools::jam::install() {
   local dir token=""
   while [[ "${#}" != 0 ]]; do
@@ -48,7 +62,7 @@ function util::tools::jam::install() {
     util::print::title "Installing jam ${version}"
     curl_args=(-fsSL -o "${dir}/jam")
     [[ -n "${token}" ]] && curl_args+=(--header "Authorization: Token ${token}")
-    curl "${curl_args[@]}" "https://github.com/paketo-buildpacks/jam/releases/download/${version}/jam-${os}-${arch}"
+    util::tools::curl_with_retry "${curl_args[@]}" "https://github.com/paketo-buildpacks/jam/releases/download/${version}/jam-${os}-${arch}"
     chmod +x "${dir}/jam"
   else
     util::print::info "Using $("${dir}"/jam version)"
@@ -74,7 +88,7 @@ function util::tools::pack::install() {
     util::print::title "Installing pack ${version}"
     curl_args=(-fsSL -o "${tmp_location}")
     [[ -n "${token}" ]] && curl_args+=(--header "Authorization: Token ${token}")
-    curl "${curl_args[@]}" "https://github.com/buildpacks/pack/releases/download/${version}/pack-${version}-${os}${arch:+-$arch}.tgz"
+    util::tools::curl_with_retry "${curl_args[@]}" "https://github.com/buildpacks/pack/releases/download/${version}/pack-${version}-${os}${arch:+-$arch}.tgz"
     tar xzf "${tmp_location}" -C "${dir}"
     chmod +x "${dir}/pack"
     rm "${tmp_location}"
