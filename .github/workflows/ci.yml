@@ -56,7 +56,7 @@ jobs:
         working-directory: ${{ steps.wd.outputs.dir }}
         run: |
           export CNB_BUILD_DIR="$(mktemp -d)"
-          (./bin/detect; true); code=$?
+          code=0; (set +e; ./bin/detect) || code=$?
           [[ $code -eq 100 ]] || { echo "expected exit 100, got $code"; exit 1; }
 
   test:
