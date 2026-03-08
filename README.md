@@ -2,6 +2,10 @@
 
 Cloud Native Buildpack for Rust: builds a **single crate**, a **workspace** (all packages), or one **package** in a workspace (suite-style layout).
 
+- **Image:** `ghcr.io/octopilot/rust` (see [buildpack.toml](buildpack.toml) for current version).
+- **CI:** [.github/workflows/ci.yml](.github/workflows/ci.yml) — test (package + verify), package, push image on main/tags, release notes on tags.
+- **Release:** [.github/workflows/release.yml](.github/workflows/release.yml) — workflow_dispatch to bump version in buildpack.toml, tag, push; CI then pushes the image and creates the GitHub release with notes.
+
 ## Detection
 
 - Passes if `Cargo.toml` exists at the app root or in `BP_RUST_WORKSPACE_DIR`.
@@ -10,14 +14,14 @@ Cloud Native Buildpack for Rust: builds a **single crate**, a **workspace** (all
 
 - Installs Rust (rustup, stable) into a cached layer when not present.
 - Runs `cargo build` in **release** or **debug** mode (see `BP_RUST_BUILD_PROFILE`), with optional target and package selection.
-- Copies the resulting binary to `bin/<name>` (name from Cargo: package name or `[[bin]]` name, hyphens → underscores) and sets the default `web` process.
+- Copies the resulting binary to `bin/<name>` (name from Cargo: package name or `[[bin]]` name) and sets the default `web` process (launch.toml with `command` as a string for lifecycle compatibility).
 
 **Asset copy (public/, config/, etc.)**: The buildpack does *not* copy assets. Use `project.toml` with an [inline buildpack](https://buildpacks.io/docs/for-app-developers/how-to/build-inputs/use-inline-buildpacks) to copy `public/`, `config/`, or other app-specific paths after the Rust build. Example:
 
 ```toml
 [[io.buildpacks.group]]
 id = "octopilot/rust"
-version = "0.1.5"
+version = "0.1.9"
 
 [[io.buildpacks.group]]
 id = "myapp/copy-assets"
@@ -54,9 +58,16 @@ Set at build time (e.g. `pack build --env BP_RUST_PACKAGE=myapp_service_impl` or
 3. **Suite (one service)** — Repo has a workspace under a subdirectory (e.g. `microservices/`) with many packages. Set `BP_RUST_WORKSPACE_DIR=microservices` and `BP_RUST_PACKAGE=<crate_name>` to build and run that single binary.
 4. **Debug builds** — For faster iteration or debugging, set `BP_RUST_BUILD_PROFILE=debug` (e.g. `pack build myapp --env BP_RUST_BUILD_PROFILE=debug`). Use `release` (default) for production.
 
-## Single-step CI build (with optional per-binary images)
+## CI and release (this repo)
 
-Use `scripts/package.sh` for a single CI step that builds the monolith and optionally creates one image per binary:
+- **CI ([ci.yml](.github/workflows/ci.yml))**  
+  On push to `main`, tags `v*`, and pull requests: runs **test** (package + verify tgz). On push to `main` or tag `v*`: runs **push** (package and publish to `ghcr.io/octopilot/rust:<version>`). On tag `v*`: runs **release-notes** (previous-tag, generate notes, create/update GitHub release).
+- **Trigger Release ([release.yml](.github/workflows/release.yml))**  
+  Manual run: bumps version in buildpack.toml (patch/minor/major), commits, tags `vX.Y.Z`, pushes. That tag triggers CI, which pushes the buildpack image and creates the release with notes. Requires `REPO_PAT` (or token input) with `contents: write`.
+
+## Building app images with this buildpack (optional script)
+
+Use `scripts/package.sh` to build a **user app** image (not the buildpack image) using this buildpack, with optional per-binary images:
 
 ```bash
 # Monolith only
@@ -70,24 +81,24 @@ With `--split-images`, you get `myapp` (monolith) plus `myapp:dioxus-app-backend
 
 ## Builder integration
 
-Add this buildpack to your builder (e.g. in `builder.toml`):
+Add this buildpack to your builder (e.g. in `builder.toml`). Use the same version in `uri` and in `order.group`:
 
 ```toml
 [[buildpacks]]
-  uri = "path-or-docker-to-rust-buildpack"
-  version = "0.0.1"
+  uri = "docker://ghcr.io/octopilot/rust:0.1.9"
+  version = "0.1.9"
 
 [[order]]
   [[order.group]]
     id = "octopilot/rust"
-    version = "0.0.1"
+    version = "0.1.9"
 ```
 
 ## Troubleshooting
 
 ### Finding the binary path in the built image
 
-The buildpack copies the Cargo-built binary to `<OUTPUT_DIR>/bin/<name>` (e.g. `/workspace/bin/rust_smoke` or `/workspace/bin/rust-smoke`). The exact name is whatever Cargo produced (from the package name or `[[bin]]`). If the default process doesn’t run (e.g. “no default process”), run the binary explicitly:
+The buildpack copies the Cargo-built binary to `<OUTPUT_DIR>/bin/<name>` (e.g. `/workspace/bin/rust_smoke` or `/workspace/bin/rust-smoke`). The exact name is whatever Cargo produced (from the package name or `[[bin]]`). The default `web` process runs `bin/<name>` from the app directory. If the default process doesn’t run (e.g. “no default process”), run the binary explicitly:
 
 ```bash
 docker run --rm --entrypoint find <image> / -type f \( -name 'rust_smoke' -o -name 'rust-smoke' \) 2>/dev/null
