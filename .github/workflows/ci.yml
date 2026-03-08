@@ -29,9 +29,23 @@ env:
   IMAGE: ghcr.io/octopilot/rust
 
 jobs:
+  check-builder:
+    name: Check builder present
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [[ -f buildpacks/builder-jammy-base/smoke/rust_test.go ]]; then
+            echo "has_builder=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_builder=false" >> "$GITHUB_OUTPUT"
+          fi
+
   unit:
     name: Unit tests (detect)
     runs-on: ubuntu-24.04
+    needs: check-builder
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -62,6 +76,7 @@ jobs:
   test:
     name: Package + verify
     runs-on: ubuntu-24.04
+    needs: unit
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -104,19 +119,6 @@ jobs:
         run: |
           test -f build/buildpack.tgz
           tar tzf build/buildpack.tgz | head -5
-
-  check-builder:
-    name: Check builder present
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - id: check
-        run: |
-          if [[ -f buildpacks/builder-jammy-base/smoke/rust_test.go ]]; then
-            echo "has_builder=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_builder=false" >> "$GITHUB_OUTPUT"
-          fi
 
   integration:
     name: Integration (Rust smoke)
