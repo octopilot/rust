@@ -75,6 +75,19 @@ jobs:
             echo "dir=." >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Cache key for buildpack tools
+        id: cache-key
+        run: |
+          TOOLS_JSON="${{ steps.wd.outputs.dir }}/scripts/.util/tools.json"
+          echo "key=buildpack-tools-${{ runner.os }}-$(md5sum "$TOOLS_JSON" | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache buildpack tools (jam, pack)
+        id: cache-tools
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.wd.outputs.dir }}/.bin
+          key: ${{ steps.cache-key.outputs.key }}
+
       - name: Get version from buildpack.toml
         id: version
         working-directory: ${{ steps.wd.outputs.dir }}

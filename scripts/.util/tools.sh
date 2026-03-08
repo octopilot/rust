@@ -29,14 +29,13 @@ function util::tools::path::export() {
   fi
 }
 
-# Retry curl up to 3 times on 5xx or connection errors (transient GitHub/CDN failures)
+# Retry curl up to 3 times on 5xx or connection errors (transient GitHub/CDN failures).
+# Use "|| code=$?" so set -e does not exit on curl failure; then check code and retry.
 function util::tools::curl_with_retry() {
   local max_attempts=3 attempt=1 code=0
   while [[ ${attempt} -le ${max_attempts} ]]; do
-    if curl "$@"; then
-      return 0
-    fi
-    code=$?
+    code=0; (set +e; curl "$@") || code=$?
+    [[ ${code} -eq 0 ]] && return 0
     [[ ${attempt} -lt ${max_attempts} ]] && sleep $((attempt * 5))
     attempt=$((attempt + 1))
   done
