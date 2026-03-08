@@ -92,10 +92,23 @@ jobs:
           test -f build/buildpack.tgz
           tar tzf build/buildpack.tgz | head -5
 
+  check-builder:
+    name: Check builder present
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [[ -f buildpacks/builder-jammy-base/smoke/rust_test.go ]]; then
+            echo "has_builder=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_builder=false" >> "$GITHUB_OUTPUT"
+          fi
+
   integration:
     name: Integration (Rust smoke)
-    needs: [unit, test]
-    if: hashFiles('buildpacks/builder-jammy-base/smoke/rust_test.go') != ''
+    needs: [unit, test, check-builder]
+    if: needs.check-builder.outputs.has_builder == 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
