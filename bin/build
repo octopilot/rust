@@ -2,9 +2,10 @@
 # Build Rust app: install Rust if needed, cargo build (release or debug), copy binary to output.
 set -e
 
-# Lifecycle sets these; use standard build container paths when unset (e.g. some platforms).
+# Lifecycle passes layers dir as first arg (buildpack contract); prefer it so launch.toml is in the correct layer.
+# See buildpacks-samples/hello-processes and Paketo: use $1 for layers_dir so export merges our launch.toml.
 BUILD_DIR="${CNB_BUILD_DIR:-/workspace}"
-LAYERS_DIR="${CNB_LAYERS_DIR:-/layers}"
+LAYERS_DIR="${1:-${CNB_LAYERS_DIR:-/layers}}"
 OUTPUT_DIR="${CNB_OUTPUT_DIR:-/workspace}"
 PLAN_PATH="${CNB_PLAN_PATH:-/dev/null}"
 
