@@ -1,5 +1,4 @@
-# CI: test (package + verify), package, push image on main/tags, release notes on tags.
-# Replaces test-pull-request.yml and push-buildpackage.yml.
+# CI: unit tests, package + verify, integration tests (builder smoke), push image, release notes.
 name: CI
 
 on:
@@ -8,11 +7,17 @@ on:
     tags: ["v*"]
     paths:
       - "buildpacks/rust/**"
+      - "buildpacks/builder-jammy-base/smoke/rust_test.go"
+      - "buildpacks/builder-jammy-base/smoke/testdata/rust/**"
+      - "buildpacks/builder-jammy-base/smoke/testdata/rust-workspace/**"
       - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
     paths:
       - "buildpacks/rust/**"
+      - "buildpacks/builder-jammy-base/smoke/rust_test.go"
+      - "buildpacks/builder-jammy-base/smoke/testdata/rust/**"
+      - "buildpacks/builder-jammy-base/smoke/testdata/rust-workspace/**"
       - ".github/workflows/ci.yml"
   workflow_dispatch:
     inputs:
@@ -24,8 +29,38 @@ env:
   IMAGE: ghcr.io/octopilot/rust
 
 jobs:
+  unit:
+    name: Unit tests (detect)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set working directory
+        id: wd
+        run: |
+          if [[ -d buildpacks/rust ]]; then
+            echo "dir=buildpacks/rust" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Detect passes when Cargo.toml present
+        working-directory: ${{ steps.wd.outputs.dir }}
+        run: |
+          export CNB_BUILD_DIR="$PWD/testdata/detect-app"
+          ./bin/detect
+          echo "detect exit (expect 0): $?"
+
+      - name: Detect fails when Cargo.toml absent
+        working-directory: ${{ steps.wd.outputs.dir }}
+        run: |
+          export CNB_BUILD_DIR="$(mktemp -d)"
+          (./bin/detect; true); code=$?
+          [[ $code -eq 100 ]] || { echo "expected exit 100, got $code"; exit 1; }
+
   test:
-    name: Test (package + verify)
+    name: Package + verify
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -57,6 +92,62 @@ jobs:
           test -f build/buildpack.tgz
           tar tzf build/buildpack.tgz | head -5
 
+  integration:
+    name: Integration (Rust smoke)
+    needs: [unit, test]
+    if: hashFiles('buildpacks/builder-jammy-base/smoke/rust_test.go') != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set working directory (rust)
+        id: wd
+        run: |
+          if [[ -d buildpacks/rust ]]; then
+            echo "dir=buildpacks/rust" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package Rust buildpack
+        working-directory: ${{ steps.wd.outputs.dir }}
+        run: |
+          V=$(awk -F'"' '/^  version = / {print $2; exit}' buildpack.toml)
+          ./scripts/package.sh --version "$V"
+
+      - name: Create test builder with local Rust buildpack
+        run: |
+          BUILDER_ROOT="buildpacks/builder-jammy-base"
+          RUST_TGZ="${{ steps.wd.outputs.dir }}/build/buildpack.tgz"
+          mkdir -p "$BUILDER_ROOT/.local-buildpacks"
+          cp "$RUST_TGZ" "$BUILDER_ROOT/.local-buildpacks/rust.tgz"
+          # file:// relative to config file dir (pack resolves from builder-test.toml location)
+          sed -e 's|uri = "docker://ghcr.io/octopilot/rust:[^"]*"|uri = "file://.local-buildpacks/rust.tgz"|' \
+              "$BUILDER_ROOT/builder.toml" > "$BUILDER_ROOT/builder-test.toml"
+
+      - name: Setup Go (builder-jammy-base)
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: buildpacks/builder-jammy-base/go.mod
+
+      - name: Install Pack
+        run: |
+          version=$(jq -r .pack buildpacks/builder-jammy-base/scripts/.util/tools.json)
+          version=${version#v}
+          curl -sSL "https://github.com/buildpacks/pack/releases/download/v${version}/pack-v${version}-linux.tgz" | tar -C /tmp -xzf -
+          sudo mv /tmp/pack /usr/local/bin/
+          pack version
+
+      - name: Create builder
+        working-directory: buildpacks/builder-jammy-base
+        run: pack builder create testbuilder --config builder-test.toml
+
+      - name: Run Rust smoke tests
+        working-directory: buildpacks/builder-jammy-base
+        run: |
+          GOMAXPROCS=4 go test -count=1 -timeout 300s ./smoke/... -v -run "TestSmoke/Smoke/Rust" --name "testbuilder"
+
   push:
     name: Package and Push
     needs: test
@@ -84,7 +175,7 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.version }}" ]]; then
             echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          elif startsWith(github.ref, 'refs/tags/v'); then
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
           else
             V=$(awk -F'"' '/^  version = / {print $2; exit}' buildpack.toml)
