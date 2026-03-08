@@ -1,0 +1,144 @@
+# CI: test (package + verify), package, push image on main/tags, release notes on tags.
+# Replaces test-pull-request.yml and push-buildpackage.yml.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "buildpacks/rust/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "buildpacks/rust/**"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (default: from buildpack.toml)"
+        required: false
+
+env:
+  IMAGE: ghcr.io/octopilot/rust
+
+jobs:
+  test:
+    name: Test (package + verify)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set working directory
+        id: wd
+        run: |
+          if [[ -d buildpacks/rust ]]; then
+            echo "dir=buildpacks/rust" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get version from buildpack.toml
+        id: version
+        working-directory: ${{ steps.wd.outputs.dir }}
+        run: |
+          V=$(awk -F'"' '/^  version = / {print $2; exit}' buildpack.toml)
+          echo "version=${V}" >> "$GITHUB_OUTPUT"
+
+      - name: Package buildpack
+        working-directory: ${{ steps.wd.outputs.dir }}
+        run: ./scripts/package.sh --version "${{ steps.version.outputs.version }}"
+
+      - name: Verify buildpack.tgz
+        working-directory: ${{ steps.wd.outputs.dir }}
+        run: |
+          test -f build/buildpack.tgz
+          tar tzf build/buildpack.tgz | head -5
+
+  push:
+    name: Package and Push
+    needs: test
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set working directory
+        id: wd
+        run: |
+          if [[ -d buildpacks/rust ]]; then
+            echo "dir=buildpacks/rust" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set version
+        id: version
+        working-directory: ${{ steps.wd.outputs.dir }}
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.version }}" ]]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          elif startsWith(github.ref, 'refs/tags/v'); then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            V=$(awk -F'"' '/^  version = / {print $2; exit}' buildpack.toml)
+            echo "version=${V}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package buildpack
+        working-directory: ${{ steps.wd.outputs.dir }}
+        run: ./scripts/package.sh --version "${{ steps.version.outputs.version }}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to GHCR
+        working-directory: ${{ steps.wd.outputs.dir }}
+        run: ./scripts/publish.sh --image-ref "${{ env.IMAGE }}:${{ steps.version.outputs.version }}"
+
+  release-notes:
+    name: Publish GitHub Release
+    needs: push
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find Previous Tag
+        id: prev_tag
+        uses: octopilot/actions/previous-tag@main
+        with:
+          fallback: "v0.0.0"
+
+      - name: Generate Release Notes
+        id: release_notes
+        uses: octopilot/actions/release@main
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        with:
+          version: ${{ github.ref_name }}
+          since_tag: ${{ steps.prev_tag.outputs.tag }}
+          provider: anthropic
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          body_path: ${{ steps.release_notes.outputs.body_file }}
+          generate_release_notes: true
+          token: ${{ secrets.GITHUB_TOKEN }}
