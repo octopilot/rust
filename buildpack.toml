@@ -5,7 +5,7 @@ api = "0.7"
   homepage = "https://github.com/octopilot/buildpacks"
   id = "octopilot/rust"
   name = "Octopilot Rust Buildpack"
-  version = "0.1.6"
+  version = "0.1.9"
   keywords = ["rust", "cargo", "workspace", "microservices"]
 
   [[buildpack.licenses]]

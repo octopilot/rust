@@ -178,10 +178,11 @@ for BINARY in "${BINARIES[@]}"; do
   fi
   default_line=""
   [[ "$proc_type" == "web" ]] && default_line="default = true"
+  # Lifecycle 0.21.x expects process command as a string, not array (toml: incompatible types []any vs string).
   cat >> "${LAYERS_DIR}/launch.toml" << LAUNCH
 [[processes]]
 type = "${proc_type}"
-command = ["bin/${BIN_NAME}"]
+command = "bin/${BIN_NAME}"
 ${default_line}
 LAUNCH
 done
