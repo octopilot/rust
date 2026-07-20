@@ -235,15 +235,35 @@ done
 # Write manifest for per-package image tooling (one binary per line)
 for b in "${BINARIES[@]}"; do basename "$b"; done > "${OUTPUT_DIR}/.rust-binaries" 2>/dev/null || true
 
-# Remove any stray target/ and .cargo/ from the WORKSPACE so they are not
-# exported (cargo builds into the cached layer now, so these are normally
-# absent — this guards repos that committed or generated them).
-# Use || true so cleanup failure (e.g. immutable files, mounts) does not fail the build
-for dir in "${BUILD_DIR}/target" "${MANIFEST_DIR}/target" "${BUILD_DIR}/.cargo" "${MANIFEST_DIR}/.cargo"; do
-  if [[ -d "${dir}" ]]; then
-    rm -rf "${dir}" 2>/dev/null || true
-    [[ ! -d "${dir}" ]] && echo "Removed $(basename "${dir}")/ from output"
-  fi
-done
+# Prune the exported app dir: a compiled Rust service does not need its
+# source tree (or .git, CI config, encrypted secrets files...) shipped in the
+# run image. Keep ONLY bin/ + .rust-binaries + any BP_RUST_KEEP paths
+# (comma-separated, relative to the app dir) for services that load runtime
+# assets from the source tree (e.g. OpenAPI specs, static sites resolved via
+# a compiled-in CARGO_MANIFEST_DIR path).
+KEEP_LIST="${BP_RUST_KEEP:-}"
+KEEP_STAGE="$(mktemp -d)"
+mkdir -p "${KEEP_STAGE}"
+mv "${OUTPUT_DIR}/bin" "${KEEP_STAGE}/bin"
+[[ -f "${OUTPUT_DIR}/.rust-binaries" ]] && mv "${OUTPUT_DIR}/.rust-binaries" "${KEEP_STAGE}/.rust-binaries"
+if [[ -n "${KEEP_LIST}" ]]; then
+  IFS=',' read -ra _KEEP_PATHS <<< "${KEEP_LIST}"
+  for _kp in "${_KEEP_PATHS[@]}"; do
+    _kp="${_kp#/}"                       # forbid absolute escapes
+    if [[ -e "${BUILD_DIR}/${_kp}" ]]; then
+      mkdir -p "${KEEP_STAGE}/$(dirname "${_kp}")"
+      mv "${BUILD_DIR}/${_kp}" "${KEEP_STAGE}/${_kp}"
+      echo "Keeping ${_kp} in run image (BP_RUST_KEEP)"
+    else
+      echo "WARNING: BP_RUST_KEEP path not found: ${_kp}" >&2
+    fi
+  done
+fi
+# Delete everything else (incl. dotfiles); || true so odd mounts don't fail the build
+find "${BUILD_DIR}" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+# Restore the kept set
+(cd "${KEEP_STAGE}" && tar cf - .) | (cd "${BUILD_DIR}" && tar xf -)
+rm -rf "${KEEP_STAGE}"
+echo "Pruned app dir: run image ships bin/ ${KEEP_LIST:+plus BP_RUST_KEEP paths }only"
 
 echo "Rust build complete (${PROFILE}): ${#BINARIES[@]} binary(ies) -> bin/"
