@@ -33,8 +33,13 @@ else
 fi
 
 PACKAGE="${BP_RUST_PACKAGE:-}"
+# Multi-select: BP_RUST_PACKAGES=<pkg>[,<pkg>...] builds a chosen SET of
+# workspace members into one image (e.g. a service plus its migration
+# binary) — right-sized between single-package and monolith. Takes
+# precedence over BP_RUST_PACKAGE when both are set.
+PACKAGES="${BP_RUST_PACKAGES:-}"
 BINARY_NAME="${BP_RUST_BINARY_NAME:-}"
-# Monolith mode: build all workspace binaries into one image (default when workspace and no BP_RUST_PACKAGE)
+# Monolith mode: build all workspace binaries into one image (default when workspace and no BP_RUST_PACKAGE/BP_RUST_PACKAGES)
 WORKSPACE_MODE="${BP_RUST_WORKSPACE_MODE:-all}"
 FEATURES="${BP_RUST_FEATURES:-}"
 
@@ -94,6 +99,12 @@ fi
 if [[ -n "$PACKAGE" ]]; then
   EXTRA_ARGS+=(-p "$PACKAGE")
 fi
+if [[ -n "$PACKAGES" ]]; then
+  IFS=',' read -ra _PKG_LIST <<< "$PACKAGES"
+  for _p in "${_PKG_LIST[@]}"; do
+    EXTRA_ARGS+=(-p "$_p")
+  done
+fi
 if [[ -n "$FEATURES" ]]; then
   EXTRA_ARGS+=(--features "$FEATURES")
 fi
@@ -103,8 +114,9 @@ if [[ "$TARGET" == "armv7-unknown-linux-musleabihf" ]]; then
 fi
 
 # Monolith: build all workspace binaries (no -p). Single: build one package.
+# Multi (BP_RUST_PACKAGES): build the listed set.
 MONOLITH=false
-if [[ -z "$PACKAGE" && "$WORKSPACE_MODE" == "all" ]]; then
+if [[ -z "$PACKAGE" && -z "$PACKAGES" && "$WORKSPACE_MODE" == "all" ]]; then
   MONOLITH=true
 fi
 
@@ -119,6 +131,13 @@ while IFS= read -r line; do
     if [[ -n "$exe" && -f "$exe" ]]; then
       if [[ "$MONOLITH" == true ]]; then
         BINARIES+=("$exe")
+      elif [[ -n "$PACKAGES" ]]; then
+        for _p in "${_PKG_LIST[@]}"; do
+          if [[ "$line" == *"\"${_p}\""* ]]; then
+            BINARIES+=("$exe")
+            break
+          fi
+        done
       elif [[ -n "$PACKAGE" ]]; then
         if [[ "$line" == *"\"${PACKAGE}\""* ]]; then
           BINARIES=("$exe")
@@ -174,33 +193,39 @@ mkdir -p "${OUTPUT_DIR}/bin"
 echo "[rust buildpack] LAYERS_DIR=${LAYERS_DIR} OUTPUT_DIR=${OUTPUT_DIR}" >&2
 # #endregion
 
+# Process model: EVERY binary gets a process named after itself, so
+# deployments can address /cnb/process/<binary-name> deterministically in
+# single, multi (BP_RUST_PACKAGES) and monolith modes. Additionally the
+# FIRST binary is aliased as "web" with default = true, preserving the
+# `docker run <image>` / default-process behavior. (Previously the first
+# binary was ONLY exposed as "web", so charts addressing it by name got
+# StartError: /cnb/process/<name> did not exist.)
 first=true
 for BINARY in "${BINARIES[@]}"; do
   [[ -z "$BINARY" || ! -f "$BINARY" ]] && continue
   BIN_NAME=$(basename "$BINARY")
   cp "$BINARY" "${OUTPUT_DIR}/bin/${BIN_NAME}"
   chmod +x "${OUTPUT_DIR}/bin/${BIN_NAME}"
-  # Process type: "web" for first (default), else short name (e.g. backend, frontend)
-  if [[ "$first" == true ]]; then
-    proc_type="web"
-    first=false
-  else
-    # e.g. dioxus-app-backend -> backend, dioxus-app-frontend -> frontend
-    proc_type=$(echo "$BIN_NAME" | sed -E 's/^[^-]*-[^-]*-([^-]+)$/\1/')
-    [[ "$proc_type" == "$BIN_NAME" ]] && proc_type="${BIN_NAME%.*}"
-  fi
+  proc_type="${BIN_NAME%.*}"
   if [[ -s "${LAYERS_DIR}/launch.toml" ]]; then
     echo "" >> "${LAYERS_DIR}/launch.toml"
   fi
-  default_line=""
-  [[ "$proc_type" == "web" ]] && default_line="default = true"
   # Lifecycle 0.21.x expects process command as a string, not array (toml: incompatible types []any vs string).
   cat >> "${LAYERS_DIR}/launch.toml" << LAUNCH
 [[processes]]
 type = "${proc_type}"
 command = "bin/${BIN_NAME}"
-${default_line}
 LAUNCH
+  if [[ "$first" == true ]]; then
+    first=false
+    cat >> "${LAYERS_DIR}/launch.toml" << LAUNCH
+
+[[processes]]
+type = "web"
+command = "bin/${BIN_NAME}"
+default = true
+LAUNCH
+  fi
 done
 
 # #region agent log (debug: verify launch.toml content)
