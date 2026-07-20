@@ -243,7 +243,11 @@ for b in "${BINARIES[@]}"; do basename "$b"; done > "${OUTPUT_DIR}/.rust-binarie
 # a compiled-in CARGO_MANIFEST_DIR path).
 KEEP_LIST="${BP_RUST_KEEP:-}"
 KEEP_STAGE="$(mktemp -d)"
-mkdir -p "${KEEP_STAGE}"
+# mktemp -d creates mode 700; tar's "." entry would stamp that onto the app
+# dir on restore, making /workspace un-enterable for the run-image user
+# (build uid != run uid) -> "failed to launch: chdir /workspace: permission
+# denied". Normalize before archiving.
+chmod 755 "${KEEP_STAGE}"
 mv "${OUTPUT_DIR}/bin" "${KEEP_STAGE}/bin"
 [[ -f "${OUTPUT_DIR}/.rust-binaries" ]] && mv "${OUTPUT_DIR}/.rust-binaries" "${KEEP_STAGE}/.rust-binaries"
 if [[ -n "${KEEP_LIST}" ]]; then
@@ -261,8 +265,10 @@ if [[ -n "${KEEP_LIST}" ]]; then
 fi
 # Delete everything else (incl. dotfiles); || true so odd mounts don't fail the build
 find "${BUILD_DIR}" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
-# Restore the kept set
+# Restore the kept set; belt-and-braces: re-assert traversable app dir so the
+# run-image user can always chdir into it at launch.
 (cd "${KEEP_STAGE}" && tar cf - .) | (cd "${BUILD_DIR}" && tar xf -)
+chmod 755 "${BUILD_DIR}"
 rm -rf "${KEEP_STAGE}"
 echo "Pruned app dir: run image ships bin/ ${KEEP_LIST:+plus BP_RUST_KEEP paths }only"
 
