@@ -68,6 +68,21 @@ cache = true
 launch = false
 TOML
 
+# Cached target-dir layer: cargo builds into a CNB cache layer instead of the
+# workspace, so incremental compilation survives across builds (the dominant
+# cost for large workspaces). Excluded from the run image (build+cache only).
+# Combined with `pack --cache-image` / OP_CACHE_IMAGE this cache also survives
+# ephemeral CI runners as a registry image.
+RUST_TARGET_LAYER="${LAYERS_DIR}/rust-target"
+mkdir -p "${RUST_TARGET_LAYER}"
+cat > "${LAYERS_DIR}/rust-target.toml" << 'TOML'
+[types]
+build = true
+cache = true
+launch = false
+TOML
+export CARGO_TARGET_DIR="${RUST_TARGET_LAYER}"
+
 # Build args: profile (release or debug), optional target, optional -p, optional --features
 EXTRA_ARGS=("--manifest-path" "${MANIFEST_PATH}")
 if [[ "$PROFILE" == "release" ]]; then
@@ -117,9 +132,10 @@ while IFS= read -r line; do
   fi
 done < <(cargo build "${EXTRA_ARGS[@]}" --message-format=json 2>/dev/null || true)
 
-# Fallback: locate binary(ies) in profile dir
+# Fallback: locate binary(ies) in profile dir (cargo writes into the cached
+# target layer via CARGO_TARGET_DIR)
 MANIFEST_DIR="$(dirname "${MANIFEST_PATH}")"
-TARGET_DIR="${MANIFEST_DIR}/target"
+TARGET_DIR="${CARGO_TARGET_DIR}"
 PROFILE_DIR="${TARGET_DIR}/${TARGET}/${PROFILE}"
 if [[ ! -d "${PROFILE_DIR}" ]]; then
   PROFILE_DIR="${TARGET_DIR}/${PROFILE}"
@@ -194,9 +210,11 @@ done
 # Write manifest for per-package image tooling (one binary per line)
 for b in "${BINARIES[@]}"; do basename "$b"; done > "${OUTPUT_DIR}/.rust-binaries" 2>/dev/null || true
 
-# Remove target/ and .cargo/ from workspace so they are not exported (saves ~1.5GB)
+# Remove any stray target/ and .cargo/ from the WORKSPACE so they are not
+# exported (cargo builds into the cached layer now, so these are normally
+# absent — this guards repos that committed or generated them).
 # Use || true so cleanup failure (e.g. immutable files, mounts) does not fail the build
-for dir in "${TARGET_DIR}" "${BUILD_DIR}/target" "${MANIFEST_DIR}/target" "${BUILD_DIR}/.cargo" "${MANIFEST_DIR}/.cargo"; do
+for dir in "${BUILD_DIR}/target" "${MANIFEST_DIR}/target" "${BUILD_DIR}/.cargo" "${MANIFEST_DIR}/.cargo"; do
   if [[ -d "${dir}" ]]; then
     rm -rf "${dir}" 2>/dev/null || true
     [[ ! -d "${dir}" ]] && echo "Removed $(basename "${dir}")/ from output"
