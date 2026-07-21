@@ -88,6 +88,24 @@ launch = false
 TOML
 export CARGO_TARGET_DIR="${RUST_TARGET_LAYER}"
 
+# Cache hygiene (cargo-sweep stamp/file ritual): the cached target layer grows
+# monotonically and rides the registry cache image on every push/pull, so an
+# unbounded cache eventually costs more in transfer than it saves in compile.
+# Stamp BEFORE the build, sweep AFTER: everything this build did not touch is
+# deleted, keeping the layer exactly as large as the current build needs.
+# Disable with BP_RUST_SWEEP=false. Best-effort: any failure skips the sweep.
+SWEEP_ENABLED="${BP_RUST_SWEEP:-true}"
+SWEEP_DIR="${BUILD_DIR}/${WORKSPACE_DIR}"
+if [[ "${SWEEP_ENABLED}" == "true" ]]; then
+  if ! command -v cargo-sweep >/dev/null 2>&1; then
+    echo "Installing cargo-sweep (cached in toolchain layer)..."
+    cargo install cargo-sweep --locked --quiet 2>/dev/null || SWEEP_ENABLED=false
+  fi
+  if [[ "${SWEEP_ENABLED}" == "true" ]]; then
+    cargo sweep --stamp "${SWEEP_DIR}" >/dev/null 2>&1 || SWEEP_ENABLED=false
+  fi
+fi
+
 # Build args: profile (release or debug), optional target, optional -p, optional --features
 EXTRA_ARGS=("--manifest-path" "${MANIFEST_PATH}")
 if [[ "$PROFILE" == "release" ]]; then
@@ -234,6 +252,13 @@ done
 
 # Write manifest for per-package image tooling (one binary per line)
 for b in "${BINARIES[@]}"; do basename "$b"; done > "${OUTPUT_DIR}/.rust-binaries" 2>/dev/null || true
+
+# Cache hygiene, part 2: drop every cached artifact this build did not touch
+# (see the --stamp above) so the exported cache image stays right-sized.
+if [[ "${SWEEP_ENABLED}" == "true" ]]; then
+  echo "Sweeping unused artifacts from cached target layer..."
+  cargo sweep --file "${SWEEP_DIR}" 2>/dev/null || true
+fi
 
 # Prune the exported app dir: a compiled Rust service does not need its
 # source tree (or .git, CI config, encrypted secrets files...) shipped in the
