@@ -141,33 +141,51 @@ fi
 # Build from app root so relative paths in Cargo.toml resolve
 cd "${BUILD_DIR}"
 
-# Collect binaries: monolith = all executables, single = one
+# Collect real bin targets only. Build scripts, tests, and examples also
+# emit compiler-artifact messages with an executable path; those are not
+# processes. Cargo JSON is one object per line; a bin target's kind is ["bin"].
+MSG_FILE="$(mktemp)"
+set +e
+cargo build "${EXTRA_ARGS[@]}" --message-format=json >"${MSG_FILE}"
+CARGO_STATUS=$?
+set -e
+if [[ "${CARGO_STATUS}" -ne 0 ]]; then
+  echo "cargo build failed (exit ${CARGO_STATUS})." >&2
+  exit "${CARGO_STATUS}"
+fi
+
+BIN_NAMES=()
+BIN_PKGS=()
 BINARIES=()
-while IFS= read -r line; do
-  if [[ "$line" == *'"reason":"compiler-artifact"'* && "$line" == *'"executable":'* ]]; then
-    exe=$(echo "$line" | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p')
-    if [[ -n "$exe" && -f "$exe" ]]; then
-      if [[ "$MONOLITH" == true ]]; then
-        BINARIES+=("$exe")
-      elif [[ -n "$PACKAGES" ]]; then
-        for _p in "${_PKG_LIST[@]}"; do
-          if [[ "$line" == *"\"${_p}\""* ]]; then
-            BINARIES+=("$exe")
-            break
-          fi
-        done
-      elif [[ -n "$PACKAGE" ]]; then
-        if [[ "$line" == *"\"${PACKAGE}\""* ]]; then
-          BINARIES=("$exe")
-          break
-        fi
-      else
-        BINARIES=("$exe")
-        break
-      fi
-    fi
+pkg_selected() {
+  local pkg="$1"
+  local _p
+  if [[ -n "${PACKAGE}" ]]; then
+    [[ "${pkg}" == "${PACKAGE}" ]] && return 0
+    return 1
   fi
-done < <(cargo build "${EXTRA_ARGS[@]}" --message-format=json 2>/dev/null || true)
+  if [[ -n "${PACKAGES}" ]]; then
+    for _p in "${_PKG_LIST[@]}"; do
+      [[ "${pkg}" == "${_p}" ]] && return 0
+    done
+    return 1
+  fi
+  return 0
+}
+while IFS= read -r line; do
+  [[ "${line}" == *'"reason":"compiler-artifact"'* ]] || continue
+  compact="${line//[[:space:]]/}"
+  [[ "${compact}" == *'"kind":["bin"]'* || "${compact}" == *'"kind":["bin",'* ]] || continue
+  exe=$(echo "${line}" | sed -n 's/.*"executable": *"\([^"]*\)".*/\1/p')
+  name=$(echo "${line}" | sed -n 's/.*"kind": *\["bin"\][^}]*"name": *"\([^"]*\)".*/\1/p')
+  pkg=$(echo "${line}" | sed -n 's/.*"package_id": *"\([^ ]*\) .*/\1/p')
+  [[ -n "${exe}" && -f "${exe}" && -n "${name}" ]] || continue
+  pkg_selected "${pkg}" || continue
+  BIN_NAMES+=("${name}")
+  BIN_PKGS+=("${pkg}")
+  BINARIES+=("${exe}")
+done < "${MSG_FILE}"
+rm -f "${MSG_FILE}"
 
 # Fallback: locate binary(ies) in profile dir (cargo writes into the cached
 # target layer via CARGO_TARGET_DIR)
@@ -179,30 +197,87 @@ if [[ ! -d "${PROFILE_DIR}" ]]; then
 fi
 
 if [[ ${#BINARIES[@]} -eq 0 ]]; then
-  if [[ "$MONOLITH" == true ]]; then
-    # Find all executables (exclude .so, .rlib)
-    while IFS= read -r exe; do
-      [[ -n "$exe" && -f "$exe" ]] && BINARIES+=("$exe")
-    done < <(find "${PROFILE_DIR}" -maxdepth 1 -type f -executable ! -name "*.so" ! -name "*.rlib" 2>/dev/null)
-  else
-    if [[ -n "$BINARY_NAME" ]]; then
-      BINARIES=("${PROFILE_DIR}/${BINARY_NAME}")
-    elif [[ -n "$PACKAGE" ]]; then
-      try_name=$(echo "$PACKAGE" | tr '-' '_')
-      found=$(find "${PROFILE_DIR}" -maxdepth 1 -type f -executable \( -name "${try_name}" -o -name "${PACKAGE}" \) 2>/dev/null | head -1)
-      [[ -n "$found" ]] && BINARIES=("$found")
+  # Profile dir is one level down from build-script outputs, so this cannot
+  # pick up a build script. Package association is unknown here.
+  while IFS= read -r exe; do
+    [[ -n "${exe}" && -f "${exe}" ]] || continue
+    name=$(basename "${exe}")
+    if [[ -n "${BINARY_NAME}" && "${name}" != "${BINARY_NAME}" ]]; then
+      continue
     fi
-    if [[ ${#BINARIES[@]} -eq 0 ]]; then
-      found=$(find "${PROFILE_DIR}" -maxdepth 1 -type f -executable ! -name "*.so" ! -name "*.rlib" 2>/dev/null | head -1)
-      [[ -n "$found" ]] && BINARIES=("$found")
-    fi
-  fi
+    BIN_NAMES+=("${name}")
+    BIN_PKGS+=("")
+    BINARIES+=("${exe}")
+  done < <(find "${PROFILE_DIR}" -maxdepth 1 -type f -executable ! -name "*.so" ! -name "*.rlib" ! -name "*.d" 2>/dev/null)
 fi
 
 if [[ ${#BINARIES[@]} -eq 0 ]]; then
   echo "No binary found. Check Cargo.toml [package] name and [[bin]] if used." >&2
   exit 1
 fi
+
+# Which bin is the image default (process "web").
+# BP_RUST_BINARY_NAME is an override. Otherwise Cargo already knows:
+# one bin, or default-run, or the bin named after its package.
+# Several remaining candidates is a hard error so a build script or
+# manifest order cannot silently become the process.
+choose_default_index() {
+  local i
+  if [[ -n "${BINARY_NAME}" ]]; then
+    for i in "${!BIN_NAMES[@]}"; do
+      if [[ "${BIN_NAMES[$i]}" == "${BINARY_NAME}" ]]; then
+        echo "${i}"
+        return
+      fi
+    done
+    echo "BP_RUST_BINARY_NAME=${BINARY_NAME} is not a built bin (${BIN_NAMES[*]})." >&2
+    exit 1
+  fi
+  if [[ ${#BIN_NAMES[@]} -eq 1 ]]; then
+    echo 0
+    return
+  fi
+  local meta defaults=()
+  meta="$(mktemp)"
+  if cargo metadata --no-deps --format-version 1 --manifest-path "${MANIFEST_PATH}" >"${meta}" 2>/dev/null; then
+    # cargo metadata is one compact JSON line. Quoted default_run values are
+    # the names; null is unquoted and does not match.
+    while IFS= read -r drun; do
+      [[ -n "${drun}" ]] && defaults+=("${drun}")
+    done < <(grep -oE '"default_run":"[^"]+"' "${meta}" | sed 's/"default_run":"//;s/"$//')
+  fi
+  rm -f "${meta}"
+  local hits=0 hit=""
+  for i in "${!BIN_NAMES[@]}"; do
+    for drun in "${defaults[@]+"${defaults[@]}"}"; do
+      if [[ "${BIN_NAMES[$i]}" == "${drun}" ]]; then
+        hits=$((hits + 1))
+        hit="${i}"
+      fi
+    done
+  done
+  if [[ "${hits}" -eq 1 ]]; then
+    echo "${hit}"
+    return
+  fi
+  hits=0
+  hit=""
+  for i in "${!BIN_NAMES[@]}"; do
+    if [[ -n "${BIN_PKGS[$i]}" && "${BIN_NAMES[$i]}" == "${BIN_PKGS[$i]}" ]]; then
+      hits=$((hits + 1))
+      hit="${i}"
+    fi
+  done
+  if [[ "${hits}" -eq 1 ]]; then
+    echo "${hit}"
+    return
+  fi
+  echo "Several bins in this image (${BIN_NAMES[*]}). Set default-run in Cargo.toml, or BP_RUST_BINARY_NAME to choose the web process." >&2
+  exit 1
+}
+DEFAULT_INDEX="$(choose_default_index)"
+DEFAULT_NAME="${BIN_NAMES[$DEFAULT_INDEX]}"
+echo "Default process web -> ${DEFAULT_NAME}"
 
 # Copy all binaries to output and build launch.toml (at root of buildpack layers dir)
 mkdir -p "${OUTPUT_DIR}/bin"
@@ -211,31 +286,24 @@ mkdir -p "${OUTPUT_DIR}/bin"
 echo "[rust buildpack] LAYERS_DIR=${LAYERS_DIR} OUTPUT_DIR=${OUTPUT_DIR}" >&2
 # #endregion
 
-# Process model: EVERY binary gets a process named after itself, so
-# deployments can address /cnb/process/<binary-name> deterministically in
-# single, multi (BP_RUST_PACKAGES) and monolith modes. Additionally the
-# FIRST binary is aliased as "web" with default = true, preserving the
-# `docker run <image>` / default-process behavior. (Previously the first
-# binary was ONLY exposed as "web", so charts addressing it by name got
-# StartError: /cnb/process/<name> did not exist.)
-first=true
-for BINARY in "${BINARIES[@]}"; do
-  [[ -z "$BINARY" || ! -f "$BINARY" ]] && continue
-  BIN_NAME=$(basename "$BINARY")
-  cp "$BINARY" "${OUTPUT_DIR}/bin/${BIN_NAME}"
+# Every bin gets /cnb/process/<name>. The chosen default is also "web"
+# so `docker run` and a chart with no command start that binary.
+for i in "${!BINARIES[@]}"; do
+  BINARY="${BINARIES[$i]}"
+  BIN_NAME="${BIN_NAMES[$i]}"
+  [[ -n "${BINARY}" && -f "${BINARY}" && -n "${BIN_NAME}" ]] || continue
+  cp "${BINARY}" "${OUTPUT_DIR}/bin/${BIN_NAME}"
   chmod +x "${OUTPUT_DIR}/bin/${BIN_NAME}"
-  proc_type="${BIN_NAME%.*}"
   if [[ -s "${LAYERS_DIR}/launch.toml" ]]; then
     echo "" >> "${LAYERS_DIR}/launch.toml"
   fi
-  # Lifecycle 0.21.x expects process command as a string, not array (toml: incompatible types []any vs string).
+  # Lifecycle 0.21.x expects process command as a string, not array.
   cat >> "${LAYERS_DIR}/launch.toml" << LAUNCH
 [[processes]]
-type = "${proc_type}"
+type = "${BIN_NAME}"
 command = "bin/${BIN_NAME}"
 LAUNCH
-  if [[ "$first" == true ]]; then
-    first=false
+  if [[ "${BIN_NAME}" == "${DEFAULT_NAME}" ]]; then
     cat >> "${LAYERS_DIR}/launch.toml" << LAUNCH
 
 [[processes]]
@@ -292,8 +360,16 @@ fi
 find "${BUILD_DIR}" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
 # Restore the kept set; belt-and-braces: re-assert traversable app dir so the
 # run-image user can always chdir into it at launch.
+set -o pipefail
 (cd "${KEEP_STAGE}" && tar cf - .) | (cd "${BUILD_DIR}" && tar xf -)
+set +o pipefail
 chmod 755 "${BUILD_DIR}"
+for name in "${BIN_NAMES[@]}"; do
+  if [[ ! -x "${BUILD_DIR}/bin/${name}" ]]; then
+    echo "Prune restore failed: ${BUILD_DIR}/bin/${name} is not an executable." >&2
+    exit 1
+  fi
+done
 rm -rf "${KEEP_STAGE}"
 echo "Pruned app dir: run image ships bin/ ${KEEP_LIST:+plus BP_RUST_KEEP paths }only"
 

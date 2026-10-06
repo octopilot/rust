@@ -49,12 +49,12 @@ Set at build time (e.g. `pack build --env BP_RUST_PACKAGE=myapp_service_impl` or
 | `BP_RUST_WORKSPACE_MODE` | `all` = build all binaries into one image (monolith). Default when `BP_RUST_PACKAGE` is unset. | `all` |
 | `BP_RUST_FEATURES` | Cargo features to enable (e.g. `dioxus-app-backend/server` for Dioxus fullstack backend). | unset |
 | `BP_RUST_TARGET` | Rust target triple (e.g. `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`). If unset, the buildpack uses the container’s native arch. | native arch |
-| `BP_RUST_BINARY_NAME` | Override which binary to run when the crate has multiple binaries or a non-default name | inferred |
+| `BP_RUST_BINARY_NAME` | Optional override for which bin is the `web` process. Leave unset for one bin, for `default-run`, or when the only package-named bin is obvious. Required only when several bins remain ambiguous. | inferred |
 
 ## Scenarios
 
 1. **Single crate** — One `Cargo.toml` at app root. No env needed. One binary → `bin/<crate_name>` (e.g. `bin/rust_smoke` for package `rust-smoke`).
-2. **Workspace (monolith)** — Root `Cargo.toml` with `[workspace]` and multiple members. Builds all binaries into one image; each gets a process type (`web` for first, `backend`/`frontend` etc. for others). Run with `docker run <image>` (default `web`) or `docker run --entrypoint bin/dioxus-app-backend <image>` for a specific binary. For Dioxus backends that need features, set `BP_RUST_FEATURES=dioxus-app-backend/server`.
+2. **Workspace (monolith)** — Root `Cargo.toml` with `[workspace]` and multiple members. Builds every bin into one image. Each bin is `/cnb/process/<name>`. The default `web` process is the sole bin, otherwise `default-run`, otherwise the single bin whose name matches its package. If several bins still match, the build fails until `default-run` or `BP_RUST_BINARY_NAME` is set. Build scripts are not processes. For Dioxus backends that need features, set `BP_RUST_FEATURES=dioxus-app-backend/server`.
 3. **Suite (one service)** — Repo has a workspace under a subdirectory (e.g. `microservices/`) with many packages. Set `BP_RUST_WORKSPACE_DIR=microservices` and `BP_RUST_PACKAGE=<crate_name>` to build and run that single binary.
 4. **Debug builds** — For faster iteration or debugging, set `BP_RUST_BUILD_PROFILE=debug` (e.g. `pack build myapp --env BP_RUST_BUILD_PROFILE=debug`). Use `release` (default) for production.
 

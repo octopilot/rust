@@ -90,7 +90,10 @@ function build::app() {
     for bin in ${binaries}; do
       [[ "${bin}" == "public" ]] && continue
       util::print::info "Creating ${image_name}:${bin}"
-      printf 'FROM %s\nCMD ["/workspace/bin/%s"]' "${image_name}" "${bin}" | docker build -t "${image_name}:${bin}" -f - "${tmp_ctx}"
+      # The app image entrypoint is the CNB launcher. CMD is the process
+      # type, not a filesystem path. An absolute /workspace/bin path is
+      # passed to the launcher as a process name and does not exec.
+      printf 'FROM %s\nENTRYPOINT ["/cnb/lifecycle/launcher"]\nCMD ["%s"]\n' "${image_name}" "${bin}" | docker build -t "${image_name}:${bin}" -f - "${tmp_ctx}"
     done
     rm -rf "${tmp_ctx}"
     util::print::success "Created ${image_name} + $(echo "${binaries}" | grep -cv "^public$" || true) per-binary image(s)"
