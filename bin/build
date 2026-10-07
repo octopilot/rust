@@ -61,7 +61,7 @@ export PATH="${CARGO_HOME}/bin:${PATH}"
 if [[ ! -x "${CARGO_HOME}/bin/cargo" ]]; then
   echo "Installing Rust..."
   mkdir -p "${RUST_TOOLCHAIN_LAYER}"
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --no-modify-path
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.89.0 --no-modify-path
   rustup target add "${TARGET}" 2>/dev/null || true
 fi
 
@@ -137,6 +137,16 @@ MONOLITH=false
 if [[ -z "$PACKAGE" && -z "$PACKAGES" && "$WORKSPACE_MODE" == "all" ]]; then
   MONOLITH=true
 fi
+
+# Private git dependencies (PriceWhisperer pins microscaler crates). The token
+# stays in the build container's gitconfig, which is not a cache or launch
+# layer. Do not echo it.
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+  trap 'rm -f /root/.gitconfig "${HOME}/.gitconfig"' EXIT
+fi
+
+BRRTROUTER="${BP_RUST_BRRTROUTER:-}"
 
 # Build from app root so relative paths in Cargo.toml resolve
 cd "${BUILD_DIR}"
@@ -272,12 +282,75 @@ choose_default_index() {
     echo "${hit}"
     return
   fi
+  if [[ "${BRRTROUTER}" == "1" ]]; then
+    echo "BP_RUST_BRRTROUTER: several bins (${BIN_NAMES[*]}). web is ${BIN_NAMES[0]}; publish selects each process." >&2
+    echo 0
+    return
+  fi
   echo "Several bins in this image (${BIN_NAMES[*]}). Set default-run in Cargo.toml, or BP_RUST_BINARY_NAME to choose the web process." >&2
   exit 1
 }
 DEFAULT_INDEX="$(choose_default_index)"
 DEFAULT_NAME="${BIN_NAMES[$DEFAULT_INDEX]}"
 echo "Default process web -> ${DEFAULT_NAME}"
+
+# One command per bin. A BRRTRouter service whose impl crate has ../gen/doc
+# (orders/impl -> orders/gen/doc) starts with the four flags the chart expects.
+# Paths are relative to the build context: the launcher chdirs to /workspace.
+# Workers have no gen/doc, so they stay bin/<name>.
+BIN_CMDS=()
+BRR_KEEP=""
+declare -A PKG_MANIFEST=()
+if [[ "${BRRTROUTER}" == "1" ]]; then
+  while IFS= read -r toml; do
+    pkgname="$(awk '
+      /^\[package\]/ { inpkg=1; next }
+      /^\[/ { inpkg=0 }
+      inpkg && /^name[[:space:]]*=/ {
+        line=$0
+        sub(/^[^=]*=[[:space:]]*/, "", line)
+        gsub(/["\r]/, "", line)
+        print line
+        exit
+      }
+    ' "${toml}")"
+    [[ -n "${pkgname}" ]] || continue
+    PKG_MANIFEST["${pkgname}"]="${toml}"
+  done < <(find "${BUILD_DIR}/${WORKSPACE_DIR}" -name Cargo.toml -not -path '*/target/*' -not -path '*/vendor/*' -not -path '*/.git/*')
+fi
+add_keep() {
+  local p="$1"
+  case ",${BRR_KEEP}," in
+    *,${p},*) return ;;
+  esac
+  if [[ -n "${BRR_KEEP}" ]]; then
+    BRR_KEEP="${BRR_KEEP},${p}"
+  else
+    BRR_KEEP="${p}"
+  fi
+}
+for i in "${!BIN_NAMES[@]}"; do
+  cmd="bin/${BIN_NAMES[$i]}"
+  if [[ "${BRRTROUTER}" == "1" && -n "${BIN_PKGS[$i]:-}" ]]; then
+    toml="${PKG_MANIFEST[${BIN_PKGS[$i]}]:-}"
+    if [[ -n "${toml}" && -f "$(dirname "${toml}")/../gen/doc/openapi.yaml" ]]; then
+      doc_abs="$(cd "$(dirname "${toml}")/../gen/doc" && pwd)"
+      spec_rel="$(realpath --relative-to="${BUILD_DIR}" "${doc_abs}/openapi.yaml")"
+      doc_rel="$(realpath --relative-to="${BUILD_DIR}" "${doc_abs}")"
+      cmd="bin/${BIN_NAMES[$i]} --spec ${spec_rel} --doc-dir ${doc_rel}"
+      add_keep "${doc_rel}"
+      if [[ -d "$(dirname "${toml}")/../gen/static_site" ]]; then
+        static_abs="$(cd "$(dirname "${toml}")/../gen/static_site" && pwd)"
+        static_rel="$(realpath --relative-to="${BUILD_DIR}" "${static_abs}")"
+        cmd="${cmd} --static-dir ${static_rel}"
+        add_keep "${static_rel}"
+      fi
+      cmd="${cmd} --config /app/config/config.yaml"
+      echo "BRRTROUTER ${BIN_NAMES[$i]} -> ${cmd}"
+    fi
+  fi
+  BIN_CMDS+=("${cmd}")
+done
 
 # Copy all binaries to output and build launch.toml (at root of buildpack layers dir)
 mkdir -p "${OUTPUT_DIR}/bin"
@@ -301,14 +374,14 @@ for i in "${!BINARIES[@]}"; do
   cat >> "${LAYERS_DIR}/launch.toml" << LAUNCH
 [[processes]]
 type = "${BIN_NAME}"
-command = "bin/${BIN_NAME}"
+command = "${BIN_CMDS[$i]}"
 LAUNCH
   if [[ "${BIN_NAME}" == "${DEFAULT_NAME}" ]]; then
     cat >> "${LAYERS_DIR}/launch.toml" << LAUNCH
 
 [[processes]]
 type = "web"
-command = "bin/${BIN_NAME}"
+command = "${BIN_CMDS[$i]}"
 default = true
 LAUNCH
   fi
@@ -335,6 +408,13 @@ fi
 # assets from the source tree (e.g. OpenAPI specs, static sites resolved via
 # a compiled-in CARGO_MANIFEST_DIR path).
 KEEP_LIST="${BP_RUST_KEEP:-}"
+if [[ -n "${BRR_KEEP:-}" ]]; then
+  if [[ -n "${KEEP_LIST}" ]]; then
+    KEEP_LIST="${KEEP_LIST},${BRR_KEEP}"
+  else
+    KEEP_LIST="${BRR_KEEP}"
+  fi
+fi
 KEEP_STAGE="$(mktemp -d)"
 # mktemp -d creates mode 700; tar's "." entry would stamp that onto the app
 # dir on restore, making /workspace un-enterable for the run-image user

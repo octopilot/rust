@@ -50,6 +50,7 @@ Set at build time (e.g. `pack build --env BP_RUST_PACKAGE=myapp_service_impl` or
 | `BP_RUST_FEATURES` | Cargo features to enable (e.g. `dioxus-app-backend/server` for Dioxus fullstack backend). | unset |
 | `BP_RUST_TARGET` | Rust target triple (e.g. `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`). If unset, the buildpack uses the container’s native arch. | native arch |
 | `BP_RUST_BINARY_NAME` | Optional override for which bin is the `web` process. Leave unset for one bin, for `default-run`, or when the only package-named bin is obvious. Required only when several bins remain ambiguous. | inferred |
+| `BP_RUST_BRRTROUTER` | `1` builds the listed packages in one cargo invocation. A bin whose crate has `../gen/doc` gets `--spec`, `--doc-dir`, `--static-dir`, and `--config /app/config/config.yaml`, and those directories stay in the image. Several bins are allowed; `web` is the first. `op` then publishes one image per `suite-images.txt` line. | unset |
 
 ## Scenarios
 
