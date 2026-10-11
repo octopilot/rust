@@ -57,13 +57,28 @@ CARGO_HOME="${RUST_TOOLCHAIN_LAYER}/cargo"
 export RUSTUP_HOME CARGO_HOME
 export PATH="${CARGO_HOME}/bin:${PATH}"
 
+# Rust toolchain version. BP_RUST_TOOLCHAIN overrides the default (e.g. to pin an older release for a project).
+RUST_TOOLCHAIN="${BP_RUST_TOOLCHAIN:-1.99.0}"
+
 # Install Rust into build-only layer (reused on cache)
 if [[ ! -x "${CARGO_HOME}/bin/cargo" ]]; then
-  echo "Installing Rust..."
+  echo "Installing Rust ${RUST_TOOLCHAIN}..."
   mkdir -p "${RUST_TOOLCHAIN_LAYER}"
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.89.0 --no-modify-path
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}" --no-modify-path
   rustup target add "${TARGET}" 2>/dev/null || true
 fi
+# A cached toolchain layer from an earlier buildpack version keeps its old Rust: switch it to the requested one.
+if ! rustc --version 2>/dev/null | grep -q "^rustc ${RUST_TOOLCHAIN} "; then
+  echo "Switching cached Rust toolchain to ${RUST_TOOLCHAIN}..."
+  rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+  rustup default "${RUST_TOOLCHAIN}"
+  rustup target add "${TARGET}" 2>/dev/null || true
+  # Old toolchains only take cache space.
+  for old in $(rustup toolchain list | awk '{print $1}' | grep -v "^${RUST_TOOLCHAIN}-"); do
+    rustup toolchain uninstall "${old}" >/dev/null 2>&1 || true
+  done
+fi
+echo "Using $(rustc --version)"
 
 # Mark toolchain as build+cache only (excluded from final image)
 cat > "${LAYERS_DIR}/rust-toolchain.toml" << 'TOML'

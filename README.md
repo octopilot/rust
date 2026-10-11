@@ -44,6 +44,7 @@ Set at build time (e.g. `pack build --env BP_RUST_PACKAGE=myapp_service_impl` or
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `BP_RUST_BUILD_PROFILE` | Build profile: `release` (optimized, default) or `debug` (faster compile, larger/slower binary). Accepts `release`, `debug`, or `true`/`false`. | `release` |
+| `BP_RUST_TOOLCHAIN` | Rust toolchain installed for the build. A cached toolchain layer of another version is switched to it. | `1.99.0` |
 | `BP_RUST_WORKSPACE_DIR` | Subdirectory containing the workspace `Cargo.toml` (e.g. `microservices`) | `.` |
 | `BP_RUST_PACKAGE` | Build only this package (`cargo build -p <name>`). Use for building one binary from a multi-package workspace. When unset, builds all workspace binaries (monolith mode). | unset |
 | `BP_RUST_WORKSPACE_MODE` | `all` = build all binaries into one image (monolith). Default when `BP_RUST_PACKAGE` is unset. | `all` |
