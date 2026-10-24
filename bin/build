@@ -44,7 +44,7 @@ WORKSPACE_MODE="${BP_RUST_WORKSPACE_MODE:-all}"
 FEATURES="${BP_RUST_FEATURES:-}"
 
 # Build profile: release (default) or debug (faster compile, larger/slower binary)
-# Variants: BP_RUST_VARIANTS=true compiles once, release-optimised with full debug info, and ships every bin twice:
+# Variants: BP_RUST_VARIANTS=true compiles once, release-optimised with debug info, and ships every bin twice:
 #   <name>-debug    the binary as built, debug sections compressed (symbolised profiles, backtraces with lines, gdb)
 #   <name>-release  the same code with every symbol and debug section stripped (what prod runs)
 # Each is its own process type (/cnb/process/<name>-debug, ...-release); web is the default bin's -release. Variants
@@ -55,7 +55,17 @@ case "${BP_RUST_VARIANTS:-false}" in
 esac
 if [[ -n "${VARIANTS[0]}" ]]; then
   BP_RUST_BUILD_PROFILE=release
-  export CARGO_PROFILE_RELEASE_DEBUG=full CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off
+  # BP_RUST_DEBUG_INFO: how much debug info -debug carries. line-tables-only (default): file/line for every address plus
+  # the symbol table — enough for symbolised profiles and backtraces with line numbers, at a fraction of full DWARF (a
+  # Sesame service with full DWARF was OOM-killed at 512Mi once its in-process profiler loaded the debug info, 24 Oct
+  # 2026). full: variables and types too, for gdb sessions; limited: Cargo's middle level.
+  case "${BP_RUST_DEBUG_INFO:-line-tables-only}" in
+    full|2|true) DEBUG_INFO=full ;;
+    limited|1) DEBUG_INFO=limited ;;
+    *) DEBUG_INFO=line-tables-only ;;
+  esac
+  export CARGO_PROFILE_RELEASE_DEBUG="${DEBUG_INFO}" CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off
+  echo "Variants: -debug carries ${DEBUG_INFO} debug info"
   command -v objcopy >/dev/null || { echo "BP_RUST_VARIANTS needs objcopy (binutils) in the build image." >&2; exit 1; }
 fi
 
