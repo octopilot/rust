@@ -44,6 +44,21 @@ WORKSPACE_MODE="${BP_RUST_WORKSPACE_MODE:-all}"
 FEATURES="${BP_RUST_FEATURES:-}"
 
 # Build profile: release (default) or debug (faster compile, larger/slower binary)
+# Variants: BP_RUST_VARIANTS=true compiles once, release-optimised with full debug info, and ships every bin twice:
+#   <name>-debug    the binary as built, debug sections compressed (symbolised profiles, backtraces with lines, gdb)
+#   <name>-release  the same code with every symbol and debug section stripped (what prod runs)
+# Each is its own process type (/cnb/process/<name>-debug, ...-release); web is the default bin's -release. Variants
+# imply the release profile. The image publisher fans a suite out into one image per bin and variant.
+case "${BP_RUST_VARIANTS:-false}" in
+  true|1|yes) VARIANTS=(debug release) ;;
+  *) VARIANTS=("") ;;
+esac
+if [[ -n "${VARIANTS[0]}" ]]; then
+  BP_RUST_BUILD_PROFILE=release
+  export CARGO_PROFILE_RELEASE_DEBUG=full CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off
+  command -v objcopy >/dev/null || { echo "BP_RUST_VARIANTS needs objcopy (binutils) in the build image." >&2; exit 1; }
+fi
+
 case "${BP_RUST_BUILD_PROFILE:-release}" in
   debug|false|0) PROFILE="debug" ;;
   release|true|1) PROFILE="release" ;;
@@ -374,14 +389,10 @@ mkdir -p "${OUTPUT_DIR}/bin"
 echo "[rust buildpack] LAYERS_DIR=${LAYERS_DIR} OUTPUT_DIR=${OUTPUT_DIR}" >&2
 # #endregion
 
-# Every bin gets /cnb/process/<name>. The chosen default is also "web"
-# so `docker run` and a chart with no command start that binary.
-for i in "${!BINARIES[@]}"; do
-  BINARY="${BINARIES[$i]}"
-  BIN_NAME="${BIN_NAMES[$i]}"
-  [[ -n "${BINARY}" && -f "${BINARY}" && -n "${BIN_NAME}" ]] || continue
-  cp "${BINARY}" "${OUTPUT_DIR}/bin/${BIN_NAME}"
-  chmod +x "${OUTPUT_DIR}/bin/${BIN_NAME}"
+# Every bin gets /cnb/process/<name> (with variants, one per variant: <name>-debug, <name>-release). The chosen default
+# is also "web" (its -release with variants) so `docker run` and a chart with no command start that binary.
+add_process() {
+  local type="$1" command="$2" default="$3"
   if [[ -s "${LAYERS_DIR}/launch.toml" ]]; then
     echo "" >> "${LAYERS_DIR}/launch.toml"
   fi
@@ -389,28 +400,42 @@ for i in "${!BINARIES[@]}"; do
   # itself instead of through bash -c, so the image runs on a run image without a shell (run-jammy-tiny).
   cat >> "${LAYERS_DIR}/launch.toml" << LAUNCH
 [[processes]]
-type = "${BIN_NAME}"
-command = "${BIN_CMDS[$i]}"
+type = "${type}"
+command = "${command}"
 direct = true
 LAUNCH
-  if [[ "${BIN_NAME}" == "${DEFAULT_NAME}" ]]; then
-    cat >> "${LAYERS_DIR}/launch.toml" << LAUNCH
-
-[[processes]]
-type = "web"
-command = "${BIN_CMDS[$i]}"
-direct = true
-default = true
-LAUNCH
-  fi
+  [[ "${default}" == "true" ]] && echo "default = true" >> "${LAYERS_DIR}/launch.toml"
+  return 0
+}
+OUT_NAMES=()
+for i in "${!BINARIES[@]}"; do
+  BINARY="${BINARIES[$i]}"
+  BIN_NAME="${BIN_NAMES[$i]}"
+  [[ -n "${BINARY}" && -f "${BINARY}" && -n "${BIN_NAME}" ]] || continue
+  for variant in "${VARIANTS[@]}"; do
+    out="${BIN_NAME}${variant:+-${variant}}"
+    case "${variant}" in
+      debug) objcopy --compress-debug-sections=zlib "${BINARY}" "${OUTPUT_DIR}/bin/${out}" ;;
+      release) objcopy --strip-all "${BINARY}" "${OUTPUT_DIR}/bin/${out}" ;;
+      *) cp "${BINARY}" "${OUTPUT_DIR}/bin/${out}" ;;
+    esac
+    chmod +x "${OUTPUT_DIR}/bin/${out}"
+    OUT_NAMES+=("${out}")
+    # The command starts with bin/<name>; point it at this variant's file.
+    cmd="bin/${out}${BIN_CMDS[$i]#"bin/${BIN_NAME}"}"
+    add_process "${out}" "${cmd}" false
+    if [[ "${BIN_NAME}" == "${DEFAULT_NAME}" && ( -z "${variant}" || "${variant}" == "release" ) ]]; then
+      add_process web "${cmd}" true
+    fi
+  done
 done
 
 # #region agent log (debug: verify launch.toml content)
 [[ -f "${LAYERS_DIR}/launch.toml" ]] && echo "[rust buildpack] launch.toml content:" >&2 && cat "${LAYERS_DIR}/launch.toml" >&2
 # #endregion
 
-# Write manifest for per-package image tooling (one binary per line)
-for b in "${BINARIES[@]}"; do basename "$b"; done > "${OUTPUT_DIR}/.rust-binaries" 2>/dev/null || true
+# Write manifest for per-package image tooling (one binary per line, per variant with variants)
+printf '%s\n' "${OUT_NAMES[@]}" > "${OUTPUT_DIR}/.rust-binaries" 2>/dev/null || true
 
 # Cache hygiene, part 2: drop every cached artifact this build did not touch
 # (see the --stamp above) so the exported cache image stays right-sized.
@@ -462,7 +487,7 @@ set -o pipefail
 (cd "${KEEP_STAGE}" && tar cf - .) | (cd "${BUILD_DIR}" && tar xf -)
 set +o pipefail
 chmod 755 "${BUILD_DIR}"
-for name in "${BIN_NAMES[@]}"; do
+for name in "${OUT_NAMES[@]}"; do
   if [[ ! -x "${BUILD_DIR}/bin/${name}" ]]; then
     echo "Prune restore failed: ${BUILD_DIR}/bin/${name} is not an executable." >&2
     exit 1
@@ -471,4 +496,4 @@ done
 rm -rf "${KEEP_STAGE}"
 echo "Pruned app dir: run image ships bin/ ${KEEP_LIST:+plus BP_RUST_KEEP paths }only"
 
-echo "Rust build complete (${PROFILE}): ${#BINARIES[@]} binary(ies) -> bin/"
+echo "Rust build complete (${PROFILE}${VARIANTS[0]:+, variants ${VARIANTS[*]}}): ${#BINARIES[@]} binary(ies) -> bin/"
