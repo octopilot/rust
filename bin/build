@@ -128,6 +128,58 @@ launch = false
 TOML
 export CARGO_TARGET_DIR="${RUST_TARGET_LAYER}"
 
+# Shared compile cache (sccache), opt-in: BP_RUST_SCCACHE=true plus a backend in the SCCACHE_* environment, e.g.
+# SCCACHE_WEBDAV_ENDPOINT (+ SCCACHE_WEBDAV_USERNAME/SCCACHE_WEBDAV_PASSWORD) or SCCACHE_BUCKET/SCCACHE_ENDPOINT, or
+# SCCACHE_DIR for a mounted directory. op forwards these when its caller sets OP_SCCACHE=true; they are platform env,
+# never written to a layer. Rust compiles are cached per rustc invocation and keyed on the compiler, arguments, sources
+# and CARGO_* environment, so every repo built by this buildpack (same /workspace, same CARGO_HOME and target layer
+# paths, same toolchain) shares third-party crates with every other. Linking (bins, cdylibs) and proc-macros are never
+# cached. A cache that is down or full only costs misses: the server is started up front, and the build runs without
+# the wrapper if it does not come up.
+SCCACHE_ON=false
+case "${BP_RUST_SCCACHE:-false}" in
+  true|1|yes)
+    SCCACHE_VERSION="${BP_RUST_SCCACHE_VERSION:-0.18.0}"
+    case "$(uname -m)" in
+      x86_64|amd64) SCCACHE_TRIPLE=x86_64-unknown-linux-musl SCCACHE_SHA256_DEFAULT=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89 ;;
+      aarch64|arm64) SCCACHE_TRIPLE=aarch64-unknown-linux-musl SCCACHE_SHA256_DEFAULT=2b3284d5da3b46a47dc4229e75bb7b88ac4aa99c8d754fb7d2f84997e5a4354a ;;
+      *) SCCACHE_TRIPLE="" ;;
+    esac
+    # The pinned checksum is for the default version; another version needs BP_RUST_SCCACHE_SHA256.
+    SCCACHE_SHA256="${BP_RUST_SCCACHE_SHA256:-}"
+    [[ -z "${SCCACHE_SHA256}" && "${SCCACHE_VERSION}" == "0.18.0" ]] && SCCACHE_SHA256="${SCCACHE_SHA256_DEFAULT:-}"
+    SCCACHE_BIN="${CARGO_HOME}/bin/sccache"
+    if [[ -z "${SCCACHE_TRIPLE}" || -z "${SCCACHE_SHA256}" ]]; then
+      echo "sccache: no pinned build for $(uname -m) / ${SCCACHE_VERSION} (set BP_RUST_SCCACHE_SHA256); building without it" >&2
+    elif ! { [[ -x "${SCCACHE_BIN}" ]] && "${SCCACHE_BIN}" --version 2>/dev/null | grep -q " ${SCCACHE_VERSION}$"; }; then
+      echo "Installing sccache ${SCCACHE_VERSION}..."
+      _sc_tmp="$(mktemp -d)"
+      _sc_name="sccache-v${SCCACHE_VERSION}-${SCCACHE_TRIPLE}"
+      if curl --proto '=https' --tlsv1.2 -fsSL -o "${_sc_tmp}/sccache.tar.gz" \
+          "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/${_sc_name}.tar.gz" \
+        && echo "${SCCACHE_SHA256}  ${_sc_tmp}/sccache.tar.gz" | sha256sum -c --quiet - \
+        && tar -xzf "${_sc_tmp}/sccache.tar.gz" -C "${_sc_tmp}" "${_sc_name}/sccache"; then
+        mkdir -p "${CARGO_HOME}/bin"
+        install -m 0755 "${_sc_tmp}/${_sc_name}/sccache" "${SCCACHE_BIN}"
+      else
+        echo "sccache: download or checksum failed; building without it" >&2
+      fi
+      rm -rf "${_sc_tmp}"
+    fi
+    if [[ -x "${SCCACHE_BIN}" ]]; then
+      # The server outlives single rustc calls for the whole build; incremental output is never cacheable.
+      export SCCACHE_IDLE_TIMEOUT=0 CARGO_INCREMENTAL=0
+      if "${SCCACHE_BIN}" --start-server >/dev/null 2>&1 || "${SCCACHE_BIN}" --show-stats >/dev/null 2>&1; then
+        export RUSTC_WRAPPER="${SCCACHE_BIN}"
+        SCCACHE_ON=true
+        echo "sccache: on ($("${SCCACHE_BIN}" --show-stats 2>/dev/null | awk -F'  +' '/^Cache location/ {print $2}'))"
+      else
+        echo "sccache: server did not start (cache unreachable?); building without it" >&2
+      fi
+    fi
+    ;;
+esac
+
 # Cache hygiene (cargo-sweep stamp/file ritual): the cached target layer grows
 # monotonically and rides the registry cache image on every push/pull, so an
 # unbounded cache eventually costs more in transfer than it saves in compile.
@@ -198,6 +250,12 @@ MSG_FILE="$(mktemp)"
 set +e
 cargo build "${EXTRA_ARGS[@]}" --message-format=json >"${MSG_FILE}"
 CARGO_STATUS=$?
+if [[ "${SCCACHE_ON}" == "true" ]]; then
+  echo "---- sccache stats (this build) ----"
+  "${SCCACHE_BIN}" --show-stats 2>&1 || true
+  echo "------------------------------------"
+  "${SCCACHE_BIN}" --stop-server >/dev/null 2>&1 || true
+fi
 set -e
 if [[ "${CARGO_STATUS}" -ne 0 ]]; then
   echo "cargo build failed (exit ${CARGO_STATUS})." >&2
