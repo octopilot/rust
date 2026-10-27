@@ -185,8 +185,10 @@ esac
 # unbounded cache eventually costs more in transfer than it saves in compile.
 # Stamp BEFORE the build, sweep AFTER: everything this build did not touch is
 # deleted, keeping the layer exactly as large as the current build needs.
-# Disable with BP_RUST_SWEEP=false. Best-effort: any failure skips the sweep.
-SWEEP_ENABLED="${BP_RUST_SWEEP:-true}"
+# Off by default (BP_RUST_SWEEP=true turns it on): the sweep only pays off while the target layer is kept as a
+# build cache, and with the build cache off (Octopilot's default) it costs a cargo-sweep install (~35-60 s) per build
+# for nothing. Shared compile caching is sccache's job now (BP_RUST_SCCACHE). Best-effort: any failure skips it.
+SWEEP_ENABLED="${BP_RUST_SWEEP:-false}"
 SWEEP_DIR="${BUILD_DIR}/${WORKSPACE_DIR}"
 if [[ "${SWEEP_ENABLED}" == "true" ]]; then
   if ! command -v cargo-sweep >/dev/null 2>&1; then
