@@ -105,11 +105,20 @@ if ! rustc --version 2>/dev/null | grep -q "^rustc ${RUST_TOOLCHAIN} "; then
 fi
 echo "Using $(rustc --version)"
 
-# Mark toolchain as build+cache only (excluded from final image)
-cat > "${LAYERS_DIR}/rust-toolchain.toml" << 'TOML'
+# BP_RUST_CACHE=false keeps the toolchain and target layers out of the CNB build cache. op sets it when no cache
+# image is configured (OP_CACHE_IMAGE unset): the cache then goes to a local volume, which on an ephemeral CI runner
+# dies with the runner, and exporting a multi-GB target dir there costs minutes per build for nothing.
+case "${BP_RUST_CACHE:-true}" in
+  false|0|no) RUST_LAYER_CACHE=false ;;
+  *) RUST_LAYER_CACHE=true ;;
+esac
+[[ "${RUST_LAYER_CACHE}" == "false" ]] && echo "BP_RUST_CACHE=false: toolchain and target layers are not cached"
+
+# Mark toolchain as build-only (excluded from final image), cached unless BP_RUST_CACHE=false
+cat > "${LAYERS_DIR}/rust-toolchain.toml" << TOML
 [types]
 build = true
-cache = true
+cache = ${RUST_LAYER_CACHE}
 launch = false
 TOML
 
@@ -120,10 +129,10 @@ TOML
 # ephemeral CI runners as a registry image.
 RUST_TARGET_LAYER="${LAYERS_DIR}/rust-target"
 mkdir -p "${RUST_TARGET_LAYER}"
-cat > "${LAYERS_DIR}/rust-target.toml" << 'TOML'
+cat > "${LAYERS_DIR}/rust-target.toml" << TOML
 [types]
 build = true
-cache = true
+cache = ${RUST_LAYER_CACHE}
 launch = false
 TOML
 export CARGO_TARGET_DIR="${RUST_TARGET_LAYER}"
@@ -505,7 +514,9 @@ done
 # #endregion
 
 # Write manifest for per-package image tooling (one binary per line, per variant with variants)
-printf '%s\n' "${OUT_NAMES[@]}" > "${OUTPUT_DIR}/.rust-binaries" 2>/dev/null || true
+# Sorted: cargo reports artifacts in a different order from build to build, and an unsorted list would change the
+# app layer's digest even when no binary changed.
+printf '%s\n' "${OUT_NAMES[@]}" | LC_ALL=C sort > "${OUTPUT_DIR}/.rust-binaries" 2>/dev/null || true
 
 # Cache hygiene, part 2: drop every cached artifact this build did not touch
 # (see the --stamp above) so the exported cache image stays right-sized.
