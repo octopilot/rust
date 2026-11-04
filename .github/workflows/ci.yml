@@ -79,6 +79,28 @@ jobs:
           code=0; (set +e; ./bin/detect) || code=$?
           [[ $code -eq 100 ]] || { echo "expected exit 100, got $code"; exit 1; }
 
+      - name: Build rejects an unknown BP_RUST_STRIP before installing anything
+        working-directory: ${{ steps.wd.outputs.dir }}
+        run: |
+          export CNB_BUILD_DIR="$PWD/testdata/detect-app" CNB_LAYERS_DIR="$(mktemp -d)"
+          code=0; out=$(BP_RUST_VARIANTS=true BP_RUST_STRIP=bogus ./bin/build 2>&1) || code=$?
+          echo "$out"
+          [[ $code -eq 1 ]] || { echo "expected exit 1, got $code"; exit 1; }
+          grep -q "BP_RUST_STRIP must be all or debug" <<< "$out"
+          [[ ! -e "$CNB_LAYERS_DIR/rust-toolchain" ]] || { echo "toolchain was installed"; exit 1; }
+
+      - name: objcopy strip modes keep or drop the symbol table
+        run: |
+          d=$(mktemp -d)
+          printf 'int answer(void){return 42;}\nint main(void){return answer()-42;}\n' > "$d/m.c"
+          gcc -g -O1 -o "$d/m" "$d/m.c"
+          objcopy --strip-debug "$d/m" "$d/m-debug"
+          objcopy --strip-all "$d/m" "$d/m-all"
+          syms_debug=$(nm "$d/m-debug"); syms_all=$(nm "$d/m-all" 2>&1 || true); sects=$(readelf -S "$d/m-debug")
+          grep -q ' T answer$' <<< "$syms_debug" || { echo "--strip-debug lost the symbol table"; exit 1; }
+          ! grep -q '\.debug_' <<< "$sects" || { echo "--strip-debug kept debug sections"; exit 1; }
+          ! grep -q answer <<< "$syms_all" || { echo "--strip-all kept symbols"; exit 1; }
+
   test:
     name: Package + verify
     runs-on: ubuntu-24.04
