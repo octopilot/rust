@@ -46,7 +46,8 @@ FEATURES="${BP_RUST_FEATURES:-}"
 # Build profile: release (default) or debug (faster compile, larger/slower binary)
 # Variants: BP_RUST_VARIANTS=true compiles once, release-optimised with debug info, and ships every bin twice:
 #   <name>-debug    the binary as built, debug sections compressed (symbolised profiles, backtraces with lines, gdb)
-#   <name>-release  the same code with every symbol and debug section stripped (what prod runs)
+#   <name>-release  the same code with every symbol and debug section stripped (what prod runs); BP_RUST_STRIP=debug
+#                   keeps the symbol table
 # Each is its own process type (/cnb/process/<name>-debug, ...-release); web is the default bin's -release. Variants
 # imply the release profile. The image publisher fans a suite out into one image per bin and variant.
 case "${BP_RUST_VARIANTS:-false}" in
@@ -67,6 +68,15 @@ if [[ -n "${VARIANTS[0]}" ]]; then
   export CARGO_PROFILE_RELEASE_DEBUG="${DEBUG_INFO}" CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off
   echo "Variants: -debug carries ${DEBUG_INFO} debug info"
   command -v objcopy >/dev/null || { echo "BP_RUST_VARIANTS needs objcopy (binutils) in the build image." >&2; exit 1; }
+  # BP_RUST_STRIP: what -release loses. all (default): every symbol and debug section (objcopy --strip-all), the
+  # smallest binary. debug: only the debug sections (objcopy --strip-debug), so the symbol table stays and a
+  # continuous profiler or a panic backtrace in prod shows function names, for a little more image size.
+  case "${BP_RUST_STRIP:-all}" in
+    all) RELEASE_STRIP=--strip-all ;;
+    debug) RELEASE_STRIP=--strip-debug ;;
+    *) echo "BP_RUST_STRIP must be all or debug, got '${BP_RUST_STRIP}'." >&2; exit 1 ;;
+  esac
+  echo "Variants: -release is built with objcopy ${RELEASE_STRIP}"
 fi
 
 case "${BP_RUST_BUILD_PROFILE:-release}" in
@@ -495,7 +505,7 @@ for i in "${!BINARIES[@]}"; do
     out="${BIN_NAME}${variant:+-${variant}}"
     case "${variant}" in
       debug) objcopy --compress-debug-sections=zlib "${BINARY}" "${OUTPUT_DIR}/bin/${out}" ;;
-      release) objcopy --strip-all "${BINARY}" "${OUTPUT_DIR}/bin/${out}" ;;
+      release) objcopy "${RELEASE_STRIP}" "${BINARY}" "${OUTPUT_DIR}/bin/${out}" ;;
       *) cp "${BINARY}" "${OUTPUT_DIR}/bin/${out}" ;;
     esac
     chmod +x "${OUTPUT_DIR}/bin/${out}"
